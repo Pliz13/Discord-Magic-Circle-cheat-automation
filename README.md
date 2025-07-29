@@ -38,7 +38,7 @@ F7 - FULL STOP (emergency reset)
 
 ---
 
-## ⚙️ Requirements
+## ⚙️ Requirements (only if you run the .py file)
 
 - Python 3.8+
 - [pyautogui](https://pypi.org/project/pyautogui/)
