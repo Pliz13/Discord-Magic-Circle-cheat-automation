@@ -43,7 +43,7 @@ A sleek Python-based automation tool designed specifically for **Magic Circle**,
 
 ---
 
-## ⚙️ Requirements
+## ⚙️ Requirements (only if you use the python script)
 
 - Python 3.8 or higher
 - [pyautogui](https://pypi.org/project/pyautogui/)
