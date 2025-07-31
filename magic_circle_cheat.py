@@ -2,358 +2,408 @@ import threading
 import time
 import keyboard
 import pyautogui
-import math
 import tkinter as tk
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
-from screeninfo import get_monitors
-import logging
 import sys
-import winsound  # For beep sound on Windows
+import logging
+from colorama import init as colorama_init, Fore, Style
+import random
 
-# Global state
-running = False
-paused = False
-loop_thread = None
-click_thread = None
-f5_click_thread = None
-f5_clicker_running = False
-overlay = None
-overlay_enabled = None
-delay_var = None
-sound_enabled = None  # New global for beep sound toggle
+# Initialize colorama for Windows terminal colors
+colorama_init(autoreset=True)
 
-# Status labels
-status_label_movement_main = None
-status_label_clicker_main = None
-status_label_movement_overlay = None
-status_label_clicker_overlay = None
 
-log_text_widget = None  # Text widget for logging in GUI
+class ColoredFormatter(logging.Formatter):
+    COLORS = {
+        logging.DEBUG: Fore.CYAN,
+        logging.INFO: Fore.GREEN,
+        logging.WARNING: Fore.YELLOW,
+        logging.ERROR: Fore.RED,
+        logging.CRITICAL: Fore.RED + Style.BRIGHT,
+    }
 
-DEFAULT_DELAY = 1.0
+    def format(self, record):
+        color = self.COLORS.get(record.levelno, Fore.WHITE)
+        msg = super().format(record)
+        return f"{color}{msg}{Style.RESET_ALL}"
 
-# Logging handler that writes to the Tkinter Text widget safely
-class TextHandler(logging.Handler):
+
+class TkinterLogger(logging.Handler):
+    LEVEL_COLORS = {
+        logging.DEBUG: "cyan",
+        logging.INFO: "green",
+        logging.WARNING: "orange",
+        logging.ERROR: "red",
+        logging.CRITICAL: "red4",
+    }
+
     def __init__(self, text_widget):
         super().__init__()
         self.text_widget = text_widget
+        for level, color in self.LEVEL_COLORS.items():
+            self.text_widget.tag_configure(level, foreground=color)
 
     def emit(self, record):
-        msg = self.format(record)
+        msg = self.format(record) + "\n"
+        color_tag = record.levelno
+
         def append():
             self.text_widget.configure(state='normal')
-            self.text_widget.insert(tk.END, msg + '\n')
+            self.text_widget.insert(tk.END, msg, color_tag)
             self.text_widget.configure(state='disabled')
-            self.text_widget.yview(tk.END)
+            self.text_widget.see(tk.END)
+
         self.text_widget.after(0, append)
 
-def beep_if_enabled():
-    if sound_enabled.get():
-        winsound.MessageBeep(winsound.MB_OK)
 
-def action_sequence(get_w_delay):
-    global running, paused
-    logging.info("Movement thread started")
-    while running:
-        if paused:
-            time.sleep(0.1)
-            continue
-        for _ in range(10):
-            if not running:
-                break
-            while paused and running:
+class Controller:
+    def __init__(self, delay_var, hump_speed_var, seizure_speed_var, log_callback=None):
+        self.running = False
+        self.paused = False
+        self.f5_clicker_running = False
+        self.hump_running = False
+        self.seizure_running = False
+
+        self.delay_var = delay_var
+        self.hump_speed_var = hump_speed_var
+        self.seizure_speed_var = seizure_speed_var
+
+        self.loop_thread = None
+        self.click_thread = None
+        self.f5_click_thread = None
+        self.hump_thread = None
+        self.seizure_thread = None
+
+        self.log_callback = log_callback
+
+    def log(self, level, message):
+        if self.log_callback:
+            self.log_callback(level, message)
+        else:
+            logging.getLogger().log(level, message)
+
+    def action_sequence(self):
+        self.log(logging.INFO, "Movement thread started")
+        while self.running:
+            if self.paused:
                 time.sleep(0.1)
-            logging.debug("Pressing 'w'")
+                continue
+            for _ in range(10):
+                if not self.running:
+                    break
+                while self.paused and self.running:
+                    time.sleep(0.1)
+                pyautogui.press('w')
+                time.sleep(self.delay_var.get())
+            if not self.running:
+                break
+            pyautogui.press('d')
+            for _ in range(10):
+                if not self.running:
+                    break
+                while self.paused and self.running:
+                    time.sleep(0.1)
+                pyautogui.press('s')
+                time.sleep(0.1)
+        self.log(logging.INFO, "Movement thread ended")
+
+    def auto_click(self):
+        self.log(logging.INFO, "Auto click thread started")
+        while self.running:
+            if self.paused:
+                time.sleep(0.1)
+                continue
+            pyautogui.click()
+            time.sleep(0.01)
+        self.log(logging.INFO, "Auto click thread ended")
+
+    def auto_click_f5(self):
+        self.log(logging.INFO, "F5 auto clicker thread started")
+        while self.f5_clicker_running:
+            pyautogui.click()
+            time.sleep(0.01)
+        self.log(logging.INFO, "F5 auto clicker thread ended")
+
+    # Original hump method restored
+    def hump_action(self):
+        self.log(logging.INFO, "Hump thread started")
+        while self.hump_running:
             pyautogui.press('w')
-            time.sleep(get_w_delay())
-        if not running:
-            break
-        logging.debug("Pressing 'd'")
-        pyautogui.press('d')
-        for _ in range(10):
-            if not running:
-                break
-            while paused and running:
-                time.sleep(0.1)
-            logging.debug("Pressing 's'")
             pyautogui.press('s')
-            time.sleep(0.1)
-    logging.info("Movement thread ended")
+            time.sleep(self.hump_speed_var.get())
+        self.log(logging.INFO, "Hump thread ended")
 
-def auto_click():
-    global running, paused
-    logging.info("Auto click thread started")
-    while running:
-        if paused:
-            time.sleep(0.1)
-            continue
-        pyautogui.click()
-        time.sleep(0.01)
-    logging.info("Auto click thread ended")
+    # Original seizure method restored
+    def seizure_mode(self):
+        buttons = ['w', 'a', 's', 'd']
+        self.log(logging.INFO, "Seizure mode thread started")
+        while self.seizure_running:
+            key = buttons[random.randint(0, 3)]
+            pyautogui.press(key)
+            time.sleep(self.seizure_speed_var.get())
+        self.log(logging.INFO, "Seizure mode thread ended")
 
-def auto_click_f5():
-    global f5_clicker_running
-    logging.info("F5 auto clicker thread started")
-    while f5_clicker_running:
-        pyautogui.click()
-        time.sleep(0.01)
-    logging.info("F5 auto clicker thread ended")
+    def toggle_f5_clicker(self):
+        if not self.f5_clicker_running:
+            self.log(logging.INFO, "F5 auto clicker toggled ON")
+            self.f5_clicker_running = True
+            self.f5_click_thread = threading.Thread(target=self.auto_click_f5, daemon=True)
+            self.f5_click_thread.start()
+        else:
+            self.log(logging.INFO, "F5 auto clicker toggled OFF")
+            self.f5_clicker_running = False
 
-def toggle_f5_clicker():
-    global f5_clicker_running, f5_click_thread
-    beep_if_enabled()
-    if not f5_clicker_running:
-        logging.info("F5 auto clicker toggled ON")
-        f5_clicker_running = True
-        f5_click_thread = threading.Thread(target=auto_click_f5, daemon=True)
-        f5_click_thread.start()
-    else:
-        logging.info("F5 auto clicker toggled OFF")
-        f5_clicker_running = False
-    update_status_labels()
+    def toggle_running(self):
+        if not self.running:
+            self.log(logging.INFO, "Starting movement and auto click threads")
+            self.running = True
+            self.paused = False
+            self.loop_thread = threading.Thread(target=self.action_sequence, daemon=True)
+            self.click_thread = threading.Thread(target=self.auto_click, daemon=True)
+            self.loop_thread.start()
+            self.click_thread.start()
+        else:
+            self.paused = not self.paused
+            state = "Paused" if self.paused else "Resumed"
+            self.log(logging.INFO, f"Garden Automation {state}")
 
-def toggle_pause():
-    global paused
-    paused = not paused
-    status = "Paused" if paused else "Resumed"
-    logging.info(f"Movement & clicker {status}")
-    update_status_labels()
+    def toggle_hump(self):
+        if not self.hump_running:
+            self.log(logging.INFO, "Hump spam toggled ON")
+            self.hump_running = True
+            self.hump_thread = threading.Thread(target=self.hump_action, daemon=True)
+            self.hump_thread.start()
+        else:
+            self.log(logging.INFO, "Hump spam toggled OFF")
+            self.hump_running = False
 
-def toggle_running(get_w_delay):
-    global running, loop_thread, click_thread, paused
-    beep_if_enabled()
-    if not running:
-        logging.info("Starting movement and auto click threads")
-        running = True
-        paused = False
-        loop_thread = threading.Thread(target=action_sequence, args=(get_w_delay,), daemon=True)
-        click_thread = threading.Thread(target=auto_click, daemon=True)
-        loop_thread.start()
-        click_thread.start()
-    else:
-        toggle_pause()
-    update_status_labels()
+    def toggle_seizure(self):
+        if not self.seizure_running:
+            self.log(logging.INFO, "Seizure mode toggled ON")
+            self.seizure_running = True
+            self.seizure_thread = threading.Thread(target=self.seizure_mode, daemon=True)
+            self.seizure_thread.start()
+        else:
+            self.log(logging.INFO, "Seizure mode toggled OFF")
+            self.seizure_running = False
 
-def reset_loop():
-    global running, paused, loop_thread, click_thread, f5_clicker_running
-    beep_if_enabled()
-    logging.info("FULL STOP: Resetting loop, stopping all threads & F5 clicker")
-    running = False
-    paused = False
-    f5_clicker_running = False  # stop F5 clicker too
-    if loop_thread and loop_thread.is_alive():
-        loop_thread.join(timeout=1)
-        logging.debug("Movement thread joined")
-    if click_thread and click_thread.is_alive():
-        click_thread.join(timeout=1)
-        logging.debug("Auto click thread joined")
-    loop_thread = None
-    click_thread = None
-    delay_var.set(DEFAULT_DELAY)
-    update_status_labels()
+    def reset_all(self):
+        self.log(logging.INFO, "FULL STOP: Resetting all")
+        self.running = False
+        self.paused = False
+        self.f5_clicker_running = False
+        self.hump_running = False
+        self.seizure_running = False
 
-def update_status_labels():
-    if running and not paused:
-        movement_status = "Running"
-        movement_color = "green"
-    elif paused:
-        movement_status = "Paused"
-        movement_color = "orange"
-    else:
-        movement_status = "Stopped"
-        movement_color = "red"
 
-    clicker_status = "Clicker: Enabled" if f5_clicker_running else "Clicker: Disabled"
-    clicker_color = "green" if f5_clicker_running else "red"
+class Overlay(tk.Toplevel):
+    def __init__(self, parent, controller, delay_var, hump_speed_var, seizure_speed_var):
+        super().__init__(parent)
+        self.controller = controller
+        self.delay_var = delay_var
+        self.hump_speed_var = hump_speed_var
+        self.seizure_speed_var = seizure_speed_var
 
-    if status_label_movement_main:
-        status_label_movement_main.config(text=f"Movement: {movement_status}", foreground=movement_color)
-    if status_label_clicker_main:
-        status_label_clicker_main.config(text=clicker_status, foreground=clicker_color)
-    if status_label_movement_overlay:
-        status_label_movement_overlay.config(text=f"Movement: {movement_status}", fg=movement_color)
-    if status_label_clicker_overlay:
-        status_label_clicker_overlay.config(text=clicker_status, fg=clicker_color)
+        self.overrideredirect(True)
+        self.attributes('-topmost', True)
+        self.attributes('-alpha', 0.85)
+        self.configure(bg='black')
 
-def show_overlay():
-    global overlay, overlay_enabled
-    global status_label_movement_overlay, status_label_clicker_overlay
-
-    if overlay:
-        overlay.destroy()
-        overlay = None
-
-    if overlay_enabled.get():
-        overlay = tk.Toplevel()
-        overlay.overrideredirect(True)
-        overlay.attributes('-topmost', True)
-        overlay.attributes('-alpha', 0.9)
-        overlay.configure(bg='black')
-
-        container = tk.Frame(overlay, bg="black", padx=12, pady=12, bd=2, relief="ridge")
+        container = tk.Frame(self, bg="black", padx=15, pady=15, bd=2, relief="ridge")
         container.pack()
 
-        tk.Label(
+        label = tk.Label(
             container,
-            text="F5: Toggle Auto Clicker\nF6: Start/Pause Movement & Click\nF7: FULL STOP",
+            text=(
+                "F5: Toggle Auto Clicker\n"
+                "F6: Garden Automation\n"
+                "F7: FULL STOP\n"
+                "F8: Toggle Hump (W & S spam)\n"
+                "F9: Toggle Seizure Mode (random WASD spam)"
+            ),
             font=("Segoe UI", 10),
             fg="white",
             bg="black",
-            justify="left"
-        ).pack(ipadx=10, ipady=5)
-
-        status_frame = tk.Frame(container, bg='black')
-        status_frame.pack(pady=(5, 5))
-
-        status_label_movement_overlay = tk.Label(
-            status_frame,
-            text="",
-            font=("Segoe UI", 10, "bold"),
-            bg="black"
+            justify="left",
         )
-        status_label_movement_overlay.pack(side='left', padx=(0, 10))
+        label.pack(ipadx=5, ipady=5)
 
-        status_label_clicker_overlay = tk.Label(
-            status_frame,
-            text="",
-            font=("Segoe UI", 10, "bold"),
-            bg="black"
-        )
-        status_label_clicker_overlay.pack(side='left')
+        # Status labels frame
+        self.status_frame = tk.Frame(container, bg='black')
+        self.status_frame.pack(pady=8)
 
-        ttk.Label(container, text="Delay Between 'W' Key Presses:", background='black', foreground='white').pack(pady=(5, 0))
+        self.status_movement = tk.Label(self.status_frame, font=("Segoe UI", 10, "bold"), fg="white", bg="black")
+        self.status_movement.pack(side="left", padx=(0, 10))
 
-        ttk.Scale(container, from_=0.1, to=5.0, orient='horizontal', length=200, variable=delay_var, bootstyle='info').pack(pady=5)
+        self.status_clicker = tk.Label(self.status_frame, font=("Segoe UI", 10, "bold"), fg="white", bg="black")
+        self.status_clicker.pack(side="left", padx=(0, 10))
 
-        x, y = pyautogui.position()
-        monitor = next((m for m in get_monitors() if m.x <= x <= m.x + m.width and m.y <= y <= m.y + m.height), get_monitors()[0])
-        overlay.update_idletasks()
-        width = overlay.winfo_width()
-        height = overlay.winfo_height()
-        overlay.geometry(f"+{monitor.x + monitor.width - width - 20}+{monitor.y + monitor.height - height - 20}")
+        self.status_hump = tk.Label(self.status_frame, font=("Segoe UI", 10, "bold"), fg="white", bg="black")
+        self.status_hump.pack(side="left", padx=(0, 10))
 
-        update_status_labels()
+        self.status_seizure = tk.Label(self.status_frame, font=("Segoe UI", 10, "bold"), fg="white", bg="black")
+        self.status_seizure.pack(side="left")
 
-def start_gui():
-    global delay_var, overlay_enabled, sound_enabled
-    global status_label_movement_main, status_label_clicker_main, log_text_widget
+        # Sliders on overlay
 
-    root = ttk.Window(themename="superhero")
-    root.title("Magic Circle Cheat")
-    root.geometry("420x520")
-    root.resizable(False, False)
+        ttk.Label(container, text="Delay Between 'W' Key Presses (seconds):", background='black', foreground='white').pack()
+        self.delay_scale = ttk.Scale(container, from_=0.1, to=5.0, orient="horizontal", length=220, variable=self.delay_var, bootstyle="info")
+        self.delay_scale.pack(pady=5)
 
-    delay_var = tk.DoubleVar(value=DEFAULT_DELAY)
-    overlay_enabled = tk.BooleanVar(value=False)
-    sound_enabled = tk.BooleanVar(value=True)
+        ttk.Label(container, text="Hump Speed (W/S delay):", background='black', foreground='white').pack()
+        self.hump_speed_scale = ttk.Scale(container, from_=0.001, to=0.2, orient="horizontal", length=220, variable=self.hump_speed_var, bootstyle="info")
+        self.hump_speed_scale.pack(pady=5)
 
-    frame = ttk.Frame(root, padding=20)
-    frame.pack(expand=True, fill="both")
+        ttk.Label(container, text="Seizure Speed (WASD spam delay):", background='black', foreground='white').pack()
+        self.seizure_speed_scale = ttk.Scale(container, from_=0.001, to=0.2, orient="horizontal", length=220, variable=self.seizure_speed_var, bootstyle="info")
+        self.seizure_speed_scale.pack(pady=5)
 
-    ttk.Label(frame, text="Delay Between 'W' Key Presses (in seconds):").pack(pady=(0, 10))
+        self.position_overlay()
+        self.update_status()
+        self.update_loop()
 
-    slider = ttk.Scale(frame, from_=0.1, to=5.0, orient='horizontal', length=300, variable=delay_var, bootstyle='info')
-    slider.pack()
+    def position_overlay(self):
+        padding_x = 20
+        padding_y = 40
+        self.geometry(f"+{padding_x}+{padding_y}")
 
-    speed_label = ttk.Label(frame, text="Current W delay: 1.00s")
-    speed_label.pack(pady=5)
+    def update_status(self):
+        # Movement status renamed to Garden Automation status
+        if self.controller.running and not self.controller.paused:
+            mov_text = "Garden Automation: Running"
+            mov_color = "lime"
+        elif self.controller.paused:
+            mov_text = "Garden Automation: Paused"
+            mov_color = "orange"
+        else:
+            mov_text = "Garden Automation: Stopped"
+            mov_color = "red"
 
-    def update_label(value):
-        speed_label.config(text=f"Current W delay: {float(value):.2f}s")
+        # Clicker status
+        if self.controller.f5_clicker_running:
+            clk_text = "Clicker: Enabled"
+            clk_color = "lime"
+        else:
+            clk_text = "Clicker: Disabled"
+            clk_color = "red"
 
-    slider.config(command=update_label)
+        # Hump status
+        if self.controller.hump_running:
+            hump_text = "Hump: Enabled"
+            hump_color = "lime"
+        else:
+            hump_text = "Hump: Disabled"
+            hump_color = "red"
 
-    ttk.Label(frame, text="F5: Toggle Auto Clicker\nF6: Start/Pause Movement & Click\nF7: FULL STOP").pack(pady=10)
+        # Seizure status
+        if self.controller.seizure_running:
+            seiz_text = "Seizure: Enabled"
+            seiz_color = "lime"
+        else:
+            seiz_text = "Seizure: Disabled"
+            seiz_color = "red"
 
-    status_frame = ttk.Frame(frame)
-    status_frame.pack(pady=5)
+        self.status_movement.config(text=mov_text, fg=mov_color)
+        self.status_clicker.config(text=clk_text, fg=clk_color)
+        self.status_hump.config(text=hump_text, fg=hump_color)
+        self.status_seizure.config(text=seiz_text, fg=seiz_color)
 
-    status_label_movement_main = ttk.Label(status_frame, text="Movement: Stopped", font=("Segoe UI", 10, "bold"))
-    status_label_movement_main.pack(side='left', padx=(0, 10))
+    def update_loop(self):
+        self.update_status()
+        self.after(500, self.update_loop)  # update status every 0.5 seconds
 
-    status_label_clicker_main = ttk.Label(status_frame, text="Clicker: Disabled", font=("Segoe UI", 10, "bold"))
-    status_label_clicker_main.pack(side='left')
 
-    reset_button = ttk.Button(frame, text="FULL STOP", bootstyle="danger-outline", width=20, command=reset_loop)
-    reset_button.pack(pady=10)
+class MagicCircleApp:
+    def __init__(self):
+        self.root = ttk.Window(themename="darkly")
+        self.root.title("Magic Circle Cheat")
+        self.root.geometry("480x560")
+        self.root.resizable(False, False)
 
-    show_overlay_check = ttk.Checkbutton(
-        frame,
-        text="Show controls overlay in screen corner under mouse",
-        variable=overlay_enabled,
-        command=show_overlay,
-        bootstyle="info"
-    )
-    show_overlay_check.pack(pady=(5, 0))
+        # Control variables
+        self.delay_var = tk.DoubleVar(value=1.0)  # delay for W key press
+        self.hump_speed_var = tk.DoubleVar(value=0.01)
+        self.seizure_speed_var = tk.DoubleVar(value=0.01)
 
-    sound_checkbox = ttk.Checkbutton(
-        frame,
-        text="Enable beep sounds",
-        variable=sound_enabled,
-        bootstyle="info"
-    )
-    sound_checkbox.pack(pady=(5, 10))
+        # Setup controller
+        self.controller = Controller(self.delay_var, self.hump_speed_var, self.seizure_speed_var, log_callback=self.log_message)
 
-    log_text_widget = tk.Text(frame, height=8, bg='black', fg='white', font=('Consolas', 9), state='disabled', wrap='none')
-    log_text_widget.pack(fill='both', expand=True, pady=(10, 0))
+        # UI Setup
+        self.create_widgets()
 
-    root_logger = logging.getLogger()
-    root_logger.setLevel(logging.DEBUG)
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    file_handler = logging.FileHandler("magic_circle_cheat.log", encoding='utf-8')
-    file_handler.setFormatter(formatter)
-    root_logger.addHandler(file_handler)
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(formatter)
-    root_logger.addHandler(console_handler)
-    text_handler = TextHandler(log_text_widget)
-    text_handler.setFormatter(formatter)
-    root_logger.addHandler(text_handler)
+        # Overlay starts CLOSED, do NOT create it yet
+        self.overlay = None
 
-    def update_glow(event):
-        mouse_x, mouse_y = event.x_root, event.y_root
-        btn_x = reset_button.winfo_rootx()
-        btn_y = reset_button.winfo_rooty()
-        btn_w = reset_button.winfo_width()
-        btn_h = reset_button.winfo_height()
-        btn_cx = btn_x + btn_w / 2
-        btn_cy = btn_y + btn_h / 2
-        dist = math.sqrt((mouse_x - btn_cx) ** 2 + (mouse_y - btn_cy) ** 2)
-        max_dist = 150
-        intensity = max(0, min(1, (max_dist - dist) / max_dist))
-        base_r, base_g, base_b = 220, 53, 69
-        r = int(base_r + (255 - base_r) * intensity)
-        g = int(base_g + (255 - base_g) * intensity)
-        b = int(base_b + (255 - base_b) * intensity)
-        color = f'#{r:02x}{g:02x}{b:02x}'
-        style_name = "GlowDanger.TButton"
-        ttk.Style().configure(style_name,
-                              foreground="white",
-                              background=color,
-                              bordercolor=color,
-                              focusthickness=3,
-                              focuscolor=color,
-                              relief="raised")
-        reset_button.config(style=style_name)
+        # Register hotkeys
+        keyboard.add_hotkey('f5', self.controller.toggle_f5_clicker)
+        keyboard.add_hotkey('f6', self.controller.toggle_running)
+        keyboard.add_hotkey('f7', self.full_stop)
+        keyboard.add_hotkey('f8', self.controller.toggle_hump)
+        keyboard.add_hotkey('f9', self.controller.toggle_seizure)
+        keyboard.add_hotkey('f10', self.toggle_overlay)  # NEW: Toggle overlay on/off
 
-    root.bind('<Motion>', update_glow)
+        # Mainloop close protocol
+        self.root.protocol("WM_DELETE_WINDOW", self.exit_app)
 
-    keyboard.add_hotkey('F5', toggle_f5_clicker)
-    keyboard.add_hotkey('F6', lambda: toggle_running(lambda: float(delay_var.get())))
-    keyboard.add_hotkey('F7', reset_loop)
+    def create_widgets(self):
+        title = ttk.Label(self.root, text="Magic Circle Cheat", font=("Segoe UI", 24, "bold"))
+        title.pack(pady=10)
 
-    def on_close():
-        logging.info("Application closing")
-        reset_loop()
-        if overlay:
-            overlay.destroy()
-        root.destroy()
+        info_label = ttk.Label(self.root,
+                               text="Hotkeys:\nF5 - Toggle Auto Clicker\nF6 - Garden Automation\nF7 - FULL STOP\nF8 - Toggle Hump (W & S spam)\nF9 - Toggle Seizure Mode (random WASD spam)\nF10 - Toggle Overlay",
+                               justify="left")
+        info_label.pack(pady=10)
 
-    root.protocol("WM_DELETE_WINDOW", on_close)
-    update_status_labels()
-    logging.info("GUI started")
-    root.mainloop()
+        # Sliders on main window
+        ttk.Label(self.root, text="Delay Between 'W' Key Presses (seconds):").pack()
+        self.delay_scale = ttk.Scale(self.root, from_=0.1, to=5.0, orient="horizontal", length=400, variable=self.delay_var, bootstyle="info")
+        self.delay_scale.pack(pady=10)
+
+        ttk.Label(self.root, text="Hump Speed (W/S delay):").pack()
+        self.hump_speed_scale = ttk.Scale(self.root, from_=0.001, to=0.2, orient="horizontal", length=400, variable=self.hump_speed_var, bootstyle="info")
+        self.hump_speed_scale.pack(pady=10)
+
+        ttk.Label(self.root, text="Seizure Speed (WASD spam delay):").pack()
+        self.seizure_speed_scale = ttk.Scale(self.root, from_=0.001, to=0.2, orient="horizontal", length=400, variable=self.seizure_speed_var, bootstyle="info")
+        self.seizure_speed_scale.pack(pady=10)
+
+        # Log box
+        log_label = ttk.Label(self.root, text="Log Output:")
+        log_label.pack()
+        self.log_text = tk.Text(self.root, height=10, state='disabled', bg='black', fg='white', font=("Consolas", 10))
+        self.log_text.pack(fill="both", expand=True, padx=10, pady=10)
+
+        # Setup logger for the text widget
+        self.tk_logger = TkinterLogger(self.log_text)
+        self.tk_logger.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        logging.getLogger().addHandler(self.tk_logger)
+        logging.getLogger().setLevel(logging.DEBUG)
+
+    def log_message(self, level, message):
+        logging.log(level, message)
+
+    def toggle_overlay(self):
+        if self.overlay is None or not self.overlay.winfo_exists():
+            self.overlay = Overlay(self.root, self.controller, self.delay_var, self.hump_speed_var, self.seizure_speed_var)
+        else:
+            self.overlay.destroy()
+            self.overlay = None
+
+    def full_stop(self):
+        self.controller.reset_all()
+
+    def exit_app(self):
+        self.full_stop()
+        if self.overlay is not None:
+            self.overlay.destroy()
+        self.root.destroy()
+        sys.exit()
+
+    def run(self):
+        self.root.mainloop()
+
 
 if __name__ == "__main__":
-    start_gui()
+    app = MagicCircleApp()
+    app.run()
